@@ -5,6 +5,8 @@ import os
 from io import BytesIO
 from datetime import datetime
 from flask import Flask, request, jsonify
+from requests_oauthlib import OAuth1Session
+from requests_oauthlib import OAuth1
 
 app = Flask(__name__)
 
@@ -16,12 +18,9 @@ consumer_secret = os.getenv('TWITTER_API_SECRET_KEY')
 access_token = os.getenv('TWITTER_ACCESS_TOKEN')
 access_token_secret = os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
 
-auth = tweepy.OAuth1UserHandler(
-    consumer_key, consumer_secret,
-    access_token, access_token_secret
-)
-twitter_api = tweepy.API(auth)
-
+# Twitter API v2 endpoint for creating a tweet
+create_tweet_url = "https://api.twitter.com/2/tweets"
+auth = OAuth1(consumer_key, consumer_secret, access_token, access_token_secret)
 def is_safe_prompt(prompt):
     """
     Checks if the generated prompt is safe according to OpenAI's content filter.
@@ -115,24 +114,52 @@ def download_image(url):
     response.raise_for_status()  # Raises an HTTPError if the response was an error
     return BytesIO(response.content)
 
-def post_to_twitter(tweet_text, image_url):
+def upload_media(image_url):
+    upload_url = 'https://upload.twitter.com/1.1/media/upload.json'
+    
+    # Download the image
+    response = requests.get(image_url)
+    files = {'media': response.content}
+    
+    # Upload the image
+    response = requests.post(upload_url, auth=auth, files=files)
+    if response.status_code == 200:
+        media_id = response.json().get('media_id_string')
+        return media_id
+    else:
+        print("Failed to upload media:", response.text)
+        return None
+
+def post_tweet_v2(content, media_id):
     """
-    Posts content to Twitter, including an optional image. The image is downloaded
-    from the provided URL and uploaded to Twitter before posting the tweet.
+    Posts a tweet using Twitter API v2 with OAuth1 authentication.
     """
     try:
-        # Download the image from the URL
-        image_bytes = download_image(image_url)
+        twitter_session = OAuth1Session(consumer_key, consumer_secret, access_token, access_token_secret)
+        response = twitter_session.post(create_tweet_url, json={"text": content, "media":{"media_ids": [f"{media_id}"]}})
         
-        # Upload the image to Twitter
-        media = twitter_api.media_upload(filename='image.jpg', file=image_bytes)
-        
-        # Post the tweet with the image
-        status = twitter_api.update_status(status=tweet_text, media_ids=[media.media_id_string])
-        
-        return f"https://twitter.com/user/status/{status.id}"
+        if response.status_code == 201:
+            print("Tweet posted successfully.")
+            tweet_data = response.json()
+            return f"https://twitter.com/user/status/{tweet_data['data']['id']}"
+        else:
+            print(f"Failed to post tweet. Status code: {response.status_code}, Response: {response.text}")
+            return None
     except Exception as e:
         print(f"Error posting to Twitter: {e}")
+        return None
+
+def post_tweet_with_media(text, media_id):
+    tweet_url = 'https://api.twitter.com/1.1/statuses/update.json'
+    payload = {'status': text, 'media_ids': media_id}
+    
+    response = requests.post(tweet_url, auth=auth, params=payload)
+    if response.status_code == 200:
+        tweet_id = response.json().get('id_str')
+        print("Tweet posted successfully:", tweet_id)
+        return f"https://twitter.com/user/status/{tweet_id}"
+    else:
+        print("Failed to post tweet:", response.text)
         return None
 
 @app.route('/post', methods=['GET'])
@@ -146,14 +173,15 @@ def run_bot_and_post():
         prompt = generate_prompt_with_chatgpt()
         image_url = generate_image_with_dalle(prompt)
         post_title = summarize_prompt_with_chatgpt(prompt)
+        media_id = upload_media(image_url)
         print("prompt:", prompt)
         print("image_url:", image_url)
         print("post_title:", post_title)
-        tweet_url = post_to_twitter(post_title, image_url)
+        tweet_url = post_tweet_v2(post_title, media_id)
         if tweet_url:
-            return jsonify({"message": "Image posted to Twitter successfully.", "link":  tweet_url, "prompt": prompt, "ïmage_url": image_url, "post_title": post_title }), 200
+            return jsonify({"message": "Image posted to Twitter successfully.", "link":  tweet_url, "prompt": prompt, "ïmage_url": image_url, "post_title": post_title, "media_id": media_id}), 200
         else:
-            return jsonify({"message": "Image was not posted to Twitter :(.", "prompt": prompt, "ïmage_url": image_url, "post_title": post_title }), 200
+            return jsonify({"message": "Image was not posted to Twitter :(.", "prompt": prompt, "ïmage_url": image_url, "post_title": post_title, "media_id": media_id}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
